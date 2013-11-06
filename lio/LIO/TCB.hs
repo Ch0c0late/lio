@@ -32,6 +32,8 @@ module LIO.TCB (
   , ShowTCB(..)
   -- * 'LabeledResult's
   , LabeledResult(..), LResStatus(..)
+  -- * 'RCRef's
+  , AllRCRef(..), MultiRCRef
   ) where
 
 import safe Control.Applicative
@@ -41,6 +43,8 @@ import safe Control.Monad
 import safe Data.Monoid
 import safe Data.IORef
 import safe Data.Typeable
+
+import LIO.RCRef
 
 --
 -- LIO Monad
@@ -172,12 +176,8 @@ instance Monoid p => Monoid (Priv p) where
 -- labeled value (the type @t@) is kept secret, not the label.  Of
 -- course, if you have a @Labeled@ within a @Labeled@, then the label
 -- on the inner value will be protected by the outer label.
-data Labeled l t = LabeledTCB !l t deriving Typeable
+data Labeled l t = LabeledTCB !l (MultiRCRef t) deriving Typeable
 -- Note: t cannot be strict if we want things like lFmap.
-
--- | Trusted 'Show' instance.
-instance (Show l, Show a) => ShowTCB (Labeled l a) where
-    showTCB (LabeledTCB l a) = show a ++ " {" ++ show l ++ "}"
 
 -- | Generic class used to get the type of labeled objects. For,
 -- instance, if you wish to associate a label with a pure value (as in
@@ -211,6 +211,9 @@ instance LabelOf Labeled where
 class ShowTCB a where
   showTCB :: a -> String
 
+-- | Trusted 'Show' instance.
+instance (Show l) => ShowTCB (Labeled l a) where
+    showTCB (LabeledTCB l a) = "not supported" ++ " {" ++ show l ++ "}"
 
 --
 -- LabeledResult
@@ -241,3 +244,37 @@ data LabeledResult l a = LabeledResultTCB {
 
 instance LabelOf LabeledResult where
   labelOf = lresLabelTCB
+
+
+--
+-- MultiRCRef
+--
+
+-- | A reference to a value 'a' that may become dead if some resource
+-- containers are killed.  The structure of a MultiRCRef reflects that
+-- of a formula of principals in conjunction normal form: a MultiRCRef
+-- for A /\ (B \/ C) corresponds to two references, the first of which
+-- is a 'RCGate' through A, and the second of which is a chain of
+-- 'RCGate's through A and B.  A user of the value can try all of the
+-- reference until they find one which is live.
+type MultiRCRef a = [AllRCRef a]
+
+-- | A chain of RCRefs, so that if any single container is dead, then
+-- the entire reference chain is dead.
+data AllRCRef a = RCTerminal a
+                | RCDead
+                | RCGate (RCRef (AllRCRef a))
+
+-- Note: who should be charged for the RCRefs and the auxiliary data
+-- structures?  They should be stored by the retainer; intuitively this
+-- makes sense if one were able to unbox the relevant structures.
+
+-- XXX Minor memory leak here.  Suppose that X corresponds to
+-- a dead container:
+--
+--      [ ] -> [ ] -> [X] -> [ ] -> V
+--
+-- While the right chain will become unreachable, the left chain
+-- stays live.  When a chain is found unreachable, what we should do is
+-- zero it out explicitly ourselves (so it ought to be IORef (Maybe
+-- (AllRCRef a)).  Don't bother for now.

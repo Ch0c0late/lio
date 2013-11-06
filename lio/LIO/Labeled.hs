@@ -24,6 +24,8 @@ Two 'Applicative' 'Functor'-like operations are also defined for
 
 -}
 
+-- XXX WITH ASYNCHRONOUS CLEARANCE CHANGE THESE SHOULD BE FAILABLE!!!
+
 module LIO.Labeled (
     Labeled, LabelOf(..)
   , DCLabeled
@@ -34,7 +36,7 @@ module LIO.Labeled (
   -- * Relabel values
   , relabelLabeledP
   , taintLabeled, taintLabeledP 
-  , lFmap, lAp
+  , lFmap
   ) where
 
 import safe Control.Monad
@@ -43,8 +45,10 @@ import safe LIO.Error
 import safe LIO.Label
 import safe LIO.Core
 import LIO.TCB
+import LIO.SafeCopy
 
 import LIO.DCLabel
+import LIO.RCLabel
 
 -- | An alias for 'Labeled' values labeled with a 'DCLabel'.
 type DCLabeled = Labeled DCLabel
@@ -60,8 +64,8 @@ type DCLabeled = Labeled DCLabel
 -- an exception is thrown (see 'guardAlloc').
 label :: DCLabel -> a -> LIO DCLabel (Labeled DCLabel a)
 label l a = do
-  withContext "label" $ guardAlloc l
-  return $ LabeledTCB l a
+    withContext "label" $ guardAlloc l
+    LabeledTCB l `fmap` multiAlloc l a
 
 -- | Constructs a 'Labeled' value using privilege to allow the value's
 -- label to be below the current label.  If the current label is
@@ -71,10 +75,10 @@ label l a = do
 -- not used to bypass the clearance.  You must use 'setClearanceP' to
 -- raise the clearance first if you wish to create a 'Labeled' value
 -- at a higher label than the current clearance.
-labelP ::  DCPriv -> DCLabel -> a -> LIO DCLabel (Labeled DCLabel a)
-labelP p l a = do
-  withContext "labelP" $ guardAllocP p l
-  return $ LabeledTCB l a
+labelP :: DCPriv -> DCLabel -> Transfer a -> a -> LIO DCLabel (Labeled DCLabel a)
+labelP p newl t a = do
+    withContext "labelP" $ guardAllocP p newl
+    LabeledTCB newl `fmap` multiAllocP p newl t a
 
 --
 -- Unlabel values
@@ -96,7 +100,10 @@ labelP p l a = do
 -- type 'LabelError'.  You can use 'labelOf' to check beforehand
 -- whether 'unlabel' will succeed.
 unlabel :: Labeled DCLabel a -> LIO DCLabel a
-unlabel (LabeledTCB l v) = withContext "unlabel" (taint l) >> return v
+unlabel (LabeledTCB l v) = do
+    old_state <- getLIOStateTCB
+    withContext "unlabel" (taint l)
+    multiTaint old_state l v
 
 -- | Extracts the contents of a 'Labeled' value just like 'unlabel',
 -- but takes a privilege argument to minimize the amount the current
@@ -105,8 +112,17 @@ unlabel (LabeledTCB l v) = withContext "unlabel" (taint l) >> return v
 -- not change the current clarance and still throws a 'LabelError' if
 -- the privileges supplied are insufficient to save the current label
 -- from needing to exceed the current clearance.
-unlabelP :: DCPriv -> Labeled DCLabel a -> LIO DCLabel a
-unlabelP p (LabeledTCB l v) = withContext "unlabelP" (taintP p l) >> return v
+-- 
+-- [RC] In the container interpretation, this doesn't really work for
+-- integrity because it is akin to saying, "Hey, I know you're already
+-- dead, but don't worry, I'm willing to copy the data (endorse it)."
+-- So we just go ahead and try to read the data, and then copy it to our
+-- stuff
+unlabelP :: DCPriv -> Transfer a -> Labeled DCLabel a -> LIO DCLabel a
+unlabelP p t (LabeledTCB l v) = do
+    old_state <- getLIOStateTCB
+    withContext "unlabelP" (taintP p l)
+    multiTaintP old_state p l t v
 
 --
 -- Relabel values
@@ -121,13 +137,18 @@ unlabelP p (LabeledTCB l v) = withContext "unlabelP" (taintP p l) >> return v
 --   2. The old label and new label must be equal (modulo privileges),
 --   as enforced by 'canFlowToP'.
 --
-relabelLabeledP :: DCPriv -> DCLabel -> Labeled DCLabel a -> LIO DCLabel (Labeled DCLabel a)
-relabelLabeledP p newl (LabeledTCB oldl v) = do
+relabelLabeledP :: DCPriv -> DCLabel -> Transfer a -> Labeled DCLabel a -> LIO DCLabel (Labeled DCLabel a)
+relabelLabeledP p newl t (LabeledTCB oldl v) = do
   clr <- getClearance
   unless (canFlowTo newl clr     &&
           canFlowToP p newl oldl &&
           canFlowToP p oldl newl) $ labelErrorP "relabelLabeledP" p [oldl, newl]
-  return $ LabeledTCB newl v
+  state <- getLIOStateTCB
+  r <- forM (cToList (dcIntegrity newl)) $ \goal -> do
+    -- we're not storing the value, so label raise not necessary
+    (_, r) <- multiExtractP state p (cSingleton goal) t v
+    ioTCB $ wrapRCRef goal r
+  return $ LabeledTCB newl r
 
 -- | Raises the label of a 'Labeled' value to the 'lub' of it's
 -- current label and the value supplied.  The label supplied must be
@@ -140,17 +161,25 @@ taintLabeled :: DCLabel -> Labeled DCLabel a -> LIO DCLabel (Labeled DCLabel a)
 taintLabeled l (LabeledTCB lold v) = do
   let lnew = lold `lub` l
   withContext "taintLabeled" $ guardAlloc lnew
-  return $ LabeledTCB lnew v
+  state <- getLIOStateTCB
+  r <- forM (cToList (dcIntegrity lnew)) $ \goal -> do
+    (_, r) <- multiExtract state (cSingleton goal) v
+    ioTCB $ wrapRCRef goal r
+  return $ LabeledTCB lnew r
 
 -- | Same as 'taintLabeled', but uses privileges when comparing the
 -- current label to the supplied label. In other words, this function
 -- can be used to lower the label of the labeled value by leveraging
 -- the supplied privileges.
-taintLabeledP :: DCPriv -> DCLabel -> Labeled DCLabel a -> LIO DCLabel (Labeled DCLabel a)
-taintLabeledP p l (LabeledTCB lold v) = do
+taintLabeledP :: DCPriv -> DCLabel -> Transfer a -> Labeled DCLabel a -> LIO DCLabel (Labeled DCLabel a)
+taintLabeledP p l t (LabeledTCB lold v) = do
   let lnew = lold `lub` l
   withContext "taintLabeledP" $ guardAllocP p lnew
-  return $ LabeledTCB lnew v
+  state <- getLIOStateTCB
+  r <- forM (cToList (dcIntegrity lnew)) $ \goal -> do
+    (_, r) <- multiExtractP state p (cSingleton goal) t v
+    ioTCB $ wrapRCRef goal r
+  return $ LabeledTCB lnew r
 
 {- $functor
 
@@ -185,16 +214,15 @@ lFmap (LabeledTCB lold v) f = do
   l <- getLabel
   -- Result label is joined with current label
   let lnew = lold `lub` l
-  -- `label` checks for clearance violation then labels
-  withContext "lFmap" $ label lnew $ f v
+  -- Check for clearance violation
+  withContext "lFmap" $ guardAlloc lnew
+  -- Apply f, preserving existing structure
+  LabeledTCB lnew `fmap` ioTCB (multiFmap lnew f v)
 
 
+-- Unimplemented for now
 -- | Similar to 'ap', apply function (wrapped by 'Labeled') to the
 -- labeld value. The label of the returned value is the 'lub' of the
 -- thread's current label, the label of the supplied function, and the
 -- label of the supplied value.
-lAp :: Labeled DCLabel (a -> b) -> Labeled DCLabel a -> LIO DCLabel (Labeled DCLabel b)
-lAp (LabeledTCB lf f) (LabeledTCB la a) = do
-  l <- getLabel
-  let lnew = l `lub` lf `lub` la
-  withContext "lAp" $ label lnew $ f a
+-- lAp :: Labeled DCLabel (a -> b) -> Labeled DCLabel a -> LIO DCLabel (Labeled DCLabel b)

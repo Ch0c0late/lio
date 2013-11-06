@@ -96,8 +96,10 @@ Library
     LIO.Concurrent.LMVar
     -- * DCLabels
     LIO.DCLabel
+    LIO.RCLabel
     -- * Privileged internals
     LIO.TCB
     LIO.TCB.LObj
     LIO.TCB.MLObj
     LIO.SafeCopy
+    LIO.RCRef

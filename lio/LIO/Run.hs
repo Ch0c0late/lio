@@ -9,12 +9,11 @@
 -- use in invoking 'LIO' code.  The functions are also available via
 -- "LIO" and "LIO.Core", but those modules will clutter your namespace
 -- with symbols you don't need in the 'IO' monad.
-module LIO.Run (LIOState(..), runLIO, tryLIO, evalLIO, privInit) where
+module LIO.Run (LIOState(..), runLIO, tryLIO, evalLIO) where
 
 import safe Control.Exception
 import safe Data.IORef
 
-import safe LIO.Label
 import LIO.TCB
 
 -- | Execute an 'LIO' action, returning its result and the final label
@@ -56,15 +55,3 @@ evalLIO :: LIO l a -> LIOState l -> IO a
 evalLIO lio s = do
   (a, _) <- runLIO lio s
   return $! a
-
--- | Initialize some privileges (within the 'IO' monad) that can be
--- passed to 'LIO' computations run with 'runLIO' or 'evalLIO'.  This
--- is a pure function, but the result is encapsulated in 'IO' to
--- make the return value inaccessible from 'LIO' computations.
---
--- Note the same effect can be achieved using the 'PrivTCB'
--- constructor, but 'PrivTCB' is easier to misuse and is only available by
--- importing "LIO.TCB".
-privInit :: (SpeaksFor p) => p -> IO (Priv p)
-privInit p | isPriv p  = fail "privInit called on Priv object"
-           | otherwise = return $ PrivTCB p

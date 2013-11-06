@@ -106,8 +106,8 @@ module LIO.DCLabel (
   , CNF, ToCNF(..)
   -- * Lower-level functions
   , principalName
-  , Disjunction, dUnderwriter, dToSet, dFromList, dImplies
-  , cTrue, cFalse, cToSet, cFromList, cImplies1
+  , Disjunction, dUnderwriter, dToSet, dFromList, dImplies, dUnion
+  , cTrue, cFalse, cToSet, cFromList, cImplies, cImplies1, cSingleton
   ) where
 
 import safe Control.Applicative

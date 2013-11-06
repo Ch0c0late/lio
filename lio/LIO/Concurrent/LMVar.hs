@@ -41,11 +41,15 @@ module LIO.Concurrent.LMVar (
   ) where
 
 import safe Control.Concurrent.MVar
+import safe Data.Traversable
 
 import safe LIO.Core
 import safe LIO.Error
 import LIO.TCB
 import LIO.TCB.LObj
+
+import LIO.RCLabel
+import LIO.SafeCopy
 
 import LIO.DCLabel
 
@@ -55,7 +59,7 @@ import LIO.DCLabel
 
 -- | An @LMVar@ is a labeled synchronization variable (an 'MVar') that
 -- can be used by concurrent threads to communicate.
-type LMVar l a = LObj l (MVar a)
+type LMVar l a = LObj l (MVar (MultiRCRef a))
 
 -- | Create a new labeled MVar, in an empty state. Note that the supplied
 -- label must be above the current label and below the current clearance.
@@ -65,7 +69,7 @@ newEmptyLMVar :: DCLabel                -- ^ Label of @LMVar@
               -> LIO DCLabel (LMVar DCLabel a)    -- ^ New mutable DCLabelocation
 newEmptyLMVar l = do
   withContext "newEmptyLMVar" $ guardAlloc l
-  ioTCB (LObjTCB l `fmap` newEmptyMVar)
+  LObjTCB l `fmap` ioTCB newEmptyMVar
 
 -- | Same as 'newEmptyLMVar' except it takes a set of privileges which
 -- are accounted for in comparing the label of the MVar to the current
@@ -73,7 +77,7 @@ newEmptyLMVar l = do
 newEmptyLMVarP :: DCPriv -> DCLabel -> LIO DCLabel (LMVar DCLabel a)
 newEmptyLMVarP p l = do
   withContext "newEmptyLMVarP" $ guardAllocP p l
-  ioTCB $ LObjTCB l `fmap` newEmptyMVar
+  LObjTCB l `fmap` ioTCB newEmptyMVar
 
 -- | Create a new labeled MVar, in an filled state with the supplied
 -- value. Note that the supplied label must be above the current label
@@ -83,15 +87,15 @@ newLMVar :: DCLabel                       -- ^ Label of @LMVar@
          -> LIO DCLabel (LMVar DCLabel a)       -- ^ New mutable DCLabelocation
 newLMVar l a = do
   withContext "newLMVar" $ guardAlloc l
-  ioTCB (LObjTCB l `fmap` newMVar a)
+  fmap (LObjTCB l) (ioTCB . newMVar =<< multiAlloc l a)
 
 -- | Same as 'newLMVar' except it takes a set of privileges which are
 -- accounted for in comparing the label of the MVar to the current label
 -- and clearance.
-newLMVarP :: DCPriv -> DCLabel -> a -> LIO DCLabel (LMVar DCLabel a)
-newLMVarP p l a = do
+newLMVarP :: DCPriv -> DCLabel -> Transfer a -> a -> LIO DCLabel (LMVar DCLabel a)
+newLMVarP p l t a = do
   withContext "newLMVarP" $ guardAllocP p l
-  ioTCB $ LObjTCB l `fmap` newMVar a
+  fmap (LObjTCB l) (ioTCB . newMVar =<< multiAllocP p l t a)
 
 --
 -- Take 'LMVar'
@@ -107,24 +111,39 @@ newLMVarP p l a = do
 -- 'guardWrite' will throw an exception if any of the IFC checks fail.
 -- Finally, like 'MVars' if the 'LMVar' is empty, @takeLMVar@
 -- blocks.
+--
+-- [RC] Note that for resource containers, we don't care about blocking
+-- behavior.
 takeLMVar :: LMVar DCLabel a -> LIO DCLabel a
-takeLMVar = blessTCB "takeLMVar" takeMVar
+takeLMVar (LObjTCB l r) = do
+    old_state <- getLIOStateTCB
+    withContext "takeLMVar" $ guardWrite l
+    multiTaint old_state l =<< ioTCB (takeMVar r)
 
 -- | Same as 'takeLMVar' except @takeLMVarP@ takes a privilege object
 -- which is used when the current label is raised.
-takeLMVarP :: DCPriv -> LMVar DCLabel a -> LIO DCLabel a
-takeLMVarP = blessPTCB "takeLMVarP" takeMVar
+takeLMVarP :: DCPriv -> Transfer a -> LMVar DCLabel a -> LIO DCLabel a
+takeLMVarP p t (LObjTCB l r) = do
+    old_state <- getLIOStateTCB
+    withContext "takeLMVarP" $ guardWriteP p l
+    multiTaintP old_state p l t =<< ioTCB (takeMVar r)
 
 -- | Non-blocking version of 'takeLMVar'. It returns @Nothing@ if the
 -- 'LMVar' is empty, otherwise it returns @Just@ value, emptying the
 -- 'LMVar'.
 tryTakeLMVar :: LMVar DCLabel a -> LIO DCLabel (Maybe a)
-tryTakeLMVar = blessTCB "tryTakeLMVar" tryTakeMVar
+tryTakeLMVar (LObjTCB l r) = do
+    old_state <- getLIOStateTCB
+    withContext "tryTakeLMVar" $ guardWrite l
+    traverse (multiTaint old_state l) =<< ioTCB (tryTakeMVar r)
 
 -- | Same as 'tryTakeLMVar', but uses priviliges when raising current
 -- label.
-tryTakeLMVarP :: DCPriv -> LMVar DCLabel a -> LIO DCLabel (Maybe a)
-tryTakeLMVarP = blessPTCB "tryTakeLMVar" tryTakeMVar
+tryTakeLMVarP :: DCPriv -> Transfer a -> LMVar DCLabel a -> LIO DCLabel (Maybe a)
+tryTakeLMVarP p t (LObjTCB l r) = do
+    old_state <- getLIOStateTCB
+    withContext "tryTakeLMVarP" $ guardWriteP p l
+    traverse (multiTaintP old_state p l t) =<< ioTCB (tryTakeMVar r)
 
 --
 -- Put 'LMVar'
@@ -142,21 +161,29 @@ tryTakeLMVarP = blessPTCB "tryTakeLMVar" tryTakeMVar
 putLMVar :: LMVar DCLabel a   -- ^ Source 'LMVar'
          -> a           -- ^ New value
          -> LIO DCLabel ()
-putLMVar = blessTCB "putLMVar" putMVar
+putLMVar (LObjTCB l r) a = do
+    withContext "putLMVar" $ guardWrite l
+    ioTCB . putMVar r =<< multiAlloc l a
 
 -- | Same as 'putLMVar' except @putLMVarP@ takes a privilege object
 -- which is used when the current label is raised.
-putLMVarP :: DCPriv -> LMVar DCLabel a -> a -> LIO DCLabel ()
-putLMVarP = blessPTCB "putLMVarP" putMVar
+putLMVarP :: DCPriv -> LMVar DCLabel a -> Transfer a -> a -> LIO DCLabel ()
+putLMVarP p (LObjTCB l r) t a = do
+  withContext "putLMVarP" $ guardWriteP p l
+  ioTCB . putMVar r =<< multiAllocP p l t a
 
 -- | Non-blocking version of 'putLMVar'. It returns @True@ if the
 -- 'LMVar' was empty and the put succeeded, otherwise it returns @False@.
 tryPutLMVar :: LMVar DCLabel a -> a -> LIO DCLabel Bool
-tryPutLMVar = blessTCB "tryPutLMVar" tryPutMVar
+tryPutLMVar (LObjTCB l r) a = do
+    withContext "tryPutLMVar" $ guardWrite l
+    ioTCB . tryPutMVar r =<< multiAlloc l a
 
 -- | Same as 'tryPutLMVar', but uses privileges when raising current label.
-tryPutLMVarP :: DCPriv -> LMVar DCLabel a -> a -> LIO DCLabel Bool
-tryPutLMVarP = blessPTCB "tryPutLMVarP" tryPutMVar
+tryPutLMVarP :: DCPriv -> LMVar DCLabel a -> Transfer a -> a -> LIO DCLabel Bool
+tryPutLMVarP p (LObjTCB l r) t a = do
+  withContext "tryPutLMVarP" $ guardWriteP p l
+  ioTCB . tryPutMVar r =<< multiAllocP p l t a
 
 --
 -- Read 'LMVar'
@@ -168,12 +195,18 @@ tryPutLMVarP = blessPTCB "tryPutLMVarP" tryPutMVar
 -- a function such as 'putLMVar', 'tryTakeLMVarP', or 'isEmptyLMVar'
 -- for this 'LMVar'.
 readLMVar :: LMVar DCLabel a -> LIO DCLabel a
-readLMVar = blessTCB "readLMVar" readMVar
+readLMVar (LObjTCB l r) = do
+    old_state <- getLIOStateTCB
+    withContext "readLMVar" $ guardWrite l
+    multiTaint old_state l =<< ioTCB (readMVar r)
 
 -- | Same as 'readLMVar' except @readLMVarP@ takes a privilege object
 -- which is used when the current label is raised.
-readLMVarP :: DCPriv -> LMVar DCLabel a -> LIO DCLabel a
-readLMVarP = blessPTCB "readLMVarP" readMVar
+readLMVarP :: DCPriv -> Transfer a -> LMVar DCLabel a -> LIO DCLabel a
+readLMVarP p t (LObjTCB l r) = do
+    old_state <- getLIOStateTCB
+    withContext "readLMVarP" $ guardWriteP p l
+    multiTaintP old_state p l t =<< ioTCB (readMVar r)
 
 --
 -- Swap 'LMVar'
@@ -189,24 +222,38 @@ readLMVarP = blessPTCB "readLMVarP" readMVar
 swapLMVar :: LMVar DCLabel a          -- ^ Source @LMVar@
           -> a                  -- ^ New value
           -> LIO DCLabel a            -- ^ Taken value
-swapLMVar = blessTCB "swapLMVar" swapMVar
+swapLMVar (LObjTCB l r) a = do
+    old_state <- getLIOStateTCB
+    withContext "swapLMVar" $ guardWrite l
+    a' <- multiAlloc l a
+    multiTaint old_state l =<< ioTCB (swapMVar r a')
 
 -- | Same as 'swapLMVar' except @swapLMVarP@ takes a privilege object
 -- which is used when the current label is raised.
-swapLMVarP :: DCPriv -> LMVar DCLabel a -> a -> LIO DCLabel a
-swapLMVarP = blessPTCB "swapLMVarP" swapMVar
+swapLMVarP :: DCPriv -> Transfer a -> LMVar DCLabel a -> Transfer a -> a -> LIO DCLabel a
+swapLMVarP p t1 (LObjTCB l r) t2 a = do
+    old_state <- getLIOStateTCB
+    withContext "swapLMVarP" $ guardWriteP p l
+    a' <- multiAllocP p l t2 a
+    multiTaintP old_state p l t1 =<< ioTCB (swapMVar r a')
 
 --
 -- Check state of 'LMVar'
 --
+
+-- ToDo: it seems this shouldn't apply the write condition
 
 -- | Check the status of an 'LMVar', i.e., whether it is empty. The
 -- function succeeds if the label of the 'LMVar' is below the current
 -- clearance -- the current label is raised to the join of the 'LMVar'
 -- label and the current label.
 isEmptyLMVar :: LMVar DCLabel a -> LIO DCLabel Bool
-isEmptyLMVar = blessTCB "isEmptyLMVar" isEmptyMVar
+isEmptyLMVar (LObjTCB l r) = do
+    withContext "isEmptyLMVar" $ guardWrite l
+    ioTCB (isEmptyMVar r)
 
 -- | Same as 'isEmptyLMVar', but uses privileges when raising current label.
 isEmptyLMVarP :: DCPriv -> LMVar DCLabel a -> LIO DCLabel Bool
-isEmptyLMVarP = blessPTCB "isEmptyLMVarP" isEmptyMVar
+isEmptyLMVarP p (LObjTCB l r) = do
+    withContext "isEmptyLMVarP" $ guardWriteP p l
+    ioTCB (isEmptyMVar r)

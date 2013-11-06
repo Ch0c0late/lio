@@ -1,6 +1,6 @@
 {-# LANGUAGE ForeignFunctionInterface, GHCForeignImportPrim, MagicHash, UnboxedTuples, UnliftedFFITypes, FlexibleInstances, UndecidableInstances, Unsafe #-}
 
-module LIO.SafeCopy (Transfer(..), DeepTransfer(..), PrimTransfer, trPair, trEither, trList, copy) where
+module LIO.SafeCopy (Transfer(..), DeepTransfer(..), PrimTransfer, trPair, trEither, trList, trPrim, copy) where
 
 import GHC.Exts
 import GHC.Base

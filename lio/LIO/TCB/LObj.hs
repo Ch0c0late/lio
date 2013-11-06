@@ -2,6 +2,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE CPP #-}
 
@@ -28,7 +29,7 @@
 --
 -- Then application-specific trusted code can wrap a specific label
 -- around each 'Handle' using the 'LObjTCB' constructor.
-module LIO.TCB.LObj (LObj(..), blessTCB, blessPTCB, GuardIO(..)) where
+module LIO.TCB.LObj (LObj(..)) where
 
 import safe Data.Typeable
 
@@ -52,48 +53,3 @@ instance LabelOf LObj where
   {-# INLINE labelOf #-}
   labelOf (LObjTCB l _) = l
 
-instance (Label l, Show t) => ShowTCB (LObj l t) where
-  showTCB (LObjTCB l t) = show t ++ " {" ++ show l ++ "}"
-
-#include "TypeVals.hs"
-
--- | Class for lifting 'IO' actions.
-class GuardIO l io lio | l io -> lio where
-  -- | Lifts an 'IO' action in the 'LIO' monad, executing a guard
-  -- before calling the function.
-  guardIOTCB :: (LIO l ()) -> io -> lio
-instance GuardIO l (IO r) (LIO l r) where
-  {-# INLINE guardIOTCB #-}
-  guardIOTCB guard io = guard >> ioTCB io
-#define GUARDIO(types, vals) \
-instance GuardIO l (types -> IO r) (types -> LIO l r) where { \
-  {-# INLINE guardIOTCB #-}; \
-  guardIOTCB guard io vals = guard >> ioTCB (io vals); \
-}
-TypesVals (GUARDIO)
-
--- | This function can be used to turn an 'IO' function into an 'LIO'
--- one.  The 'LIO' version expects a 'LObj' argument, and before
--- performing any IO uses 'guardWrite' to check that the current label
--- can write the label in the 'LObj' object.
--- 
--- The first argument should be the name of the function being defined
--- with @blessTCB@.  Its purpose is to enhance error reporting.
---
--- Note that @io@ and @lio@ are function types (of up to nine
--- arguments), which must be the same in all types except the monad.
--- For example, if @io@ is @Int -> String -> IO ()@, then @lio@ must
--- be @Int -> String -> LIO l ()@.
-blessTCB :: (GuardIO l io lio, Label l) =>
-            String -> (a -> io) -> (LObj l a) -> lio
-{-# INLINE blessTCB #-}
-blessTCB name io (LObjTCB l a) =
-  guardIOTCB (withContext name $ guardWrite l) (io a)
-
--- | A variant of 'blessTCB' that produces an 'LIO' function taking a
--- privilege argument.
-blessPTCB :: (GuardIO l io lio, PrivDesc l p) =>
-             String -> (a -> io) -> Priv p -> (LObj l a) -> lio
-{-# INLINE blessPTCB #-}
-blessPTCB name io p (LObjTCB l a) =
-  guardIOTCB (withContext name $ guardWriteP p l) (io a)

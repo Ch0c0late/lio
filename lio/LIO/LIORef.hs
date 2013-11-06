@@ -24,8 +24,7 @@ module LIO.LIORef (
   -- ** Write 'LIORef's
   , writeLIORef, writeLIORefP
   -- ** Modify 'LIORef's
-  , modifyLIORef, modifyLIORefP
-  , atomicModifyLIORef, atomicModifyLIORefP
+  , modifyLIORef
   ) where
 
 import safe Data.IORef
@@ -35,6 +34,9 @@ import safe LIO.Error
 import LIO.TCB
 import LIO.TCB.LObj
 import LIO.DCLabel
+
+import LIO.RCLabel
+import LIO.SafeCopy
 
 --
 -- Create labeled 'IORef's
@@ -46,7 +48,7 @@ import LIO.DCLabel
 -- wish to allow @LIORef@ to be an instance of 'LabelOf'.  Of course,
 -- you can create an @LIORef@ of 'Labeled' to get a limited form of
 -- flow-sensitivity.
-type LIORef l a = LObj l (IORef a)
+type LIORef l a = LObj l (IORef (MultiRCRef a))
 
 -- | Create a new reference with a particularlabel.  The label
 -- specified must be between the thread's current label and clearance,
@@ -56,15 +58,15 @@ newLIORef :: DCLabel             -- ^ Label of reference
           -> LIO DCLabel (LIORef DCLabel a) -- ^ Mutable reference
 newLIORef l a = do
   withContext "newLIORef" $ guardAlloc l
-  ioTCB (LObjTCB l `fmap` newIORef a)
+  fmap (LObjTCB l) (ioTCB . newIORef =<< multiAlloc l a)
 
 -- | Same as 'newLIORef' except @newLIORefP@ takes privileges which
 -- make the comparison to the current label more permissive, as
 -- enforced by 'guardAllocP'.
-newLIORefP :: DCPriv -> DCLabel -> a -> LIO DCLabel (LIORef DCLabel a)
-newLIORefP p l a = do
+newLIORefP :: DCPriv -> DCLabel -> Transfer a -> a -> LIO DCLabel (LIORef DCLabel a)
+newLIORefP p l t a = do
   withContext "newLIORefP" $ guardAllocP p l
-  ioTCB (LObjTCB l `fmap` newIORef a)
+  fmap (LObjTCB l) (ioTCB . newIORef =<< multiAllocP p l t a)
 
 --
 -- Read 'LIORef's
@@ -78,16 +80,18 @@ newLIORefP p l a = do
 -- read will succeed.
 readLIORef :: LIORef DCLabel a -> LIO DCLabel a
 readLIORef (LObjTCB l r) = do
+  old_state <- getLIOStateTCB
   withContext "readLIORef" $ taint l
-  ioTCB (readIORef r)
+  multiTaint old_state l =<< ioTCB (readIORef r)
 
 -- | Same as 'readLIORef', except @readLIORefP@ takes a privilege
 -- object which is used when the current label is raised (using
 -- 'taintP' instead of 'taint').
-readLIORefP :: DCPriv -> LIORef DCLabel a -> LIO DCLabel a
-readLIORefP p (LObjTCB l r) = do
+readLIORefP :: DCPriv -> Transfer a -> LIORef DCLabel a -> LIO DCLabel a
+readLIORefP p t (LObjTCB l r) = do
+  old_state <- getLIOStateTCB
   withContext "readLIORefP" $ taintP p l
-  ioTCB (readIORef r)
+  multiTaintP old_state p l t =<< ioTCB (readIORef r)
 
 --
 -- Write 'LIORef's
@@ -100,15 +104,15 @@ readLIORefP p (LObjTCB l r) = do
 writeLIORef :: LIORef DCLabel a -> a -> LIO DCLabel ()
 writeLIORef (LObjTCB l r) a = do
   withContext "writeLIORef" $ guardAlloc l
-  ioTCB (writeIORef r a)
+  ioTCB . writeIORef r =<< multiAlloc l a
 
 -- | Same as 'writeLIORef' except @writeLIORefP@ takes a set of
 -- privileges which are accounted for in comparing the label of the
 -- reference to the current label.
-writeLIORefP :: DCPriv -> LIORef DCLabel a -> a -> LIO DCLabel ()
-writeLIORefP p (LObjTCB l r) a = do
+writeLIORefP :: DCPriv -> LIORef DCLabel a -> Transfer a -> a -> LIO DCLabel ()
+writeLIORefP p (LObjTCB l r) t a = do
   withContext "writeLIORefP" $ guardAllocP p l
-  ioTCB (writeIORef r a)
+  ioTCB . writeIORef r =<< multiAllocP p l t a
 
 --
 -- Modify 'LIORef's
@@ -127,14 +131,20 @@ modifyLIORef :: LIORef DCLabel a            -- ^ Labeled reference
              -> LIO DCLabel ()
 modifyLIORef (LObjTCB l r) f = do
   withContext "modifyLIORef" $ guardAlloc l
-  ioTCB (modifyIORef r f)
+  x <- ioTCB $ readIORef r
+  x' <- ioTCB $ multiFmap l f x
+  ioTCB $ writeIORef r x'
+
+-- NB: The following function requires us to have a transfer function for
+-- *functions*.  For now this is disallowed.
 
 -- | Like 'modifyLIORef', but takes a privilege argument and guards
 -- execution with 'guardAllocP' instead of 'guardAlloc'.
-modifyLIORefP :: DCPriv -> LIORef DCLabel a -> (a -> a) -> LIO DCLabel ()
-modifyLIORefP p (LObjTCB l r) f = do
-  withContext "modifyLIORefP" $ guardAllocP p l
-  ioTCB (modifyIORef r f)
+-- modifyLIORefP :: DCPriv -> LIORef DCLabel a -> (a -> a) -> LIO DCLabel ()
+-- modifyLIORefP p (LObjTCB l r) f = do
+
+-- NB: We can't implement either of these for full MultiRCRefs; it
+-- should be possible to do them for AllRCRefs, however.  For now skip.
 
 -- | Atomically modifies the contents of an 'LIORef'. It is required
 -- that the label of the reference be above the current label, but
@@ -145,11 +155,11 @@ modifyLIORefP p (LObjTCB l r) f = do
 -- labels). These checks and label raise are done by 'guardWrite',
 -- which will raise a 'LabelError' exception if any of the IFC
 -- conditions cannot be satisfied.
-atomicModifyLIORef :: LIORef DCLabel a -> (a -> (a, b)) -> LIO DCLabel b
-atomicModifyLIORef = blessTCB "atomicModifyIORef" atomicModifyIORef
+-- atomicModifyLIORef :: LIORef DCLabel a -> (a -> (a, b)) -> LIO DCLabel b
+-- atomicModifyLIORef = blessTCB "atomicModifyIORef" atomicModifyIORef
 
 -- | Same as 'atomicModifyLIORef' except @atomicModifyLIORefP@ takes a
 -- set of privileges and uses 'guardWriteP' instead of 'guardWrite'.
-atomicModifyLIORefP :: DCPriv -> LIORef DCLabel a -> (a -> (a, b)) -> LIO DCLabel b
-atomicModifyLIORefP = blessPTCB "atomicModifyIORef" atomicModifyIORef
+--  atomicModifyLIORefP :: Priv CNF -> LIORef DCLabel a -> (a -> (a, b)) -> LIO DCLabel b
+--  atomicModifyLIORefP = blessPTCB "atomicModifyIORef" atomicModifyIORef
 
