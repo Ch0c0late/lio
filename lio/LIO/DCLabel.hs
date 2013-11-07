@@ -106,8 +106,8 @@ module LIO.DCLabel (
   , CNF, ToCNF(..)
   -- * Lower-level functions
   , principalName
-  , Disjunction, dToSet, dFromList
-  , cTrue, cFalse, cToSet, cFromList
+  , Disjunction, dUnderwriter, dToSet, dFromList, dImplies
+  , cTrue, cFalse, cToSet, cFromList, cImplies1
   ) where
 
 import safe Control.Applicative
@@ -180,25 +180,28 @@ principal = principalBS . fromString
 -- 'CNF'.  There is generally not much need to work directly with
 -- @Disjunction@s unless you need to serialize and de-serialize them
 -- (by means of 'dToSet' and 'dFromList').
-data Disjunction = Disjunction !(Set Principal) {-# UNPACK #-} !SetTag
+data Disjunction = Disjunction !(Set Principal) {-# UNPACK #-} !SetTag !(Maybe Principal)
                    deriving (Typeable)
+
+dUnderwriter :: Disjunction -> Maybe Principal
+dUnderwriter (Disjunction _ _ mp) = mp
 
 -- | Expose the set of 'Principal's being ORed together in a
 -- 'Disjunction'.
 dToSet :: Disjunction -> Set Principal
-dToSet (Disjunction ps _) = ps
+dToSet (Disjunction ps _ _) = ps
 
 instance Eq Disjunction where
-  (Disjunction ps1 t1) == (Disjunction ps2 t2) = t1 == t2 && ps1 == ps2
+  (Disjunction ps1 t1 _) == (Disjunction ps2 t2 _) = t1 == t2 && ps1 == ps2
 
 instance Ord Disjunction where
-  compare (Disjunction ps1 _) (Disjunction ps2 _) =
+  compare (Disjunction ps1 _ _) (Disjunction ps2 _ _) =
     case compare (Set.size ps1) (Set.size ps2) of
       EQ -> compare ps1 ps2
       o  -> o
 
 instance Show Disjunction where
-  showsPrec _ (Disjunction ps _)
+  showsPrec _ (Disjunction ps _ _)
     | Set.size ps == 0 = ("False" ++)
     | Set.size ps == 1 = shows $ Set.findMin ps
     | otherwise = showParen True $
@@ -221,23 +224,32 @@ instance Monoid Disjunction where
   mappend = dUnion
 
 dFalse :: Disjunction
-dFalse = Disjunction Set.empty 0
+dFalse = Disjunction Set.empty 0 Nothing
 
+-- [RC] Sets pointed element to the singleton, since it must be true
 dSingleton :: Principal -> Disjunction
-dSingleton p@(Principal _ t) = Disjunction (Set.singleton p) t
+dSingleton p@(Principal _ t) = Disjunction (Set.singleton p) t (Just p)
 
+-- [RC] Arbitrarily pick the first one to be pointed when both provide.
+-- XXX This *could* get us in trouble if some TCB code is dUnion'ing and
+-- then making a privilege out of it.
 dUnion :: Disjunction -> Disjunction -> Disjunction
-dUnion (Disjunction ps1 t1) (Disjunction ps2 t2) =
-  Disjunction (Set.union ps1 ps2) (t1 .|. t2)
+dUnion (Disjunction ps1 t1 p1) (Disjunction ps2 t2 p2) =
+  Disjunction (Set.union ps1 ps2) (t1 .|. t2) (p1 `a` p2)
+  where Just x `a` _ = Just x
+        _ `a` Just x = Just x
+        Nothing `a` Nothing = Nothing
 
 -- | Convert a list of 'Principal's into a 'Disjunction'.
+-- [RC] does NOT pick pointed element, unless the list is singleton
 dFromList :: [Principal] -> Disjunction
-dFromList pl = Disjunction (Set.fromList pl) tres
+dFromList [p] = dSingleton p
+dFromList pl = Disjunction (Set.fromList pl) tres Nothing
   where tres = foldl' (\tl (Principal _ tr) -> tl .|. tr) 0 pl
 
 -- | Returns 'True' iff the first disjunction is a subset of the second.
 dImplies :: Disjunction -> Disjunction -> Bool
-dImplies (Disjunction ps1 t1) (Disjunction ps2 t2)
+dImplies (Disjunction ps1 t1 _) (Disjunction ps2 t2 _)
   | t1 .&. t2 /= t1 = False
   | otherwise       = ps1 `Set.isSubsetOf` ps2
 
