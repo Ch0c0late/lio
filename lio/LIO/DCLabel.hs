@@ -99,7 +99,7 @@ True
 
 module LIO.DCLabel (
   -- * Top-level aliases and functions
-    DC, DCPriv, DCLabeled, dcDefaultState, evalDC, tryDC
+    DC, DCPriv, dcDefaultState, evalDC, tryDC
   -- * Main types and functions
   , Principal, principalBS, principal
   , DCLabel(..), dcPublic, (%%), (/\), (\/)
@@ -126,7 +126,6 @@ import safe Text.Read
 import safe LIO.Exception (SomeException)
 import safe LIO.Core
 import safe LIO.Label
-import safe LIO.Labeled
 import safe LIO.Run
 
 type SetTag = Word64
@@ -498,9 +497,6 @@ type DC = LIO DCLabel
 -- | 'DCLabel' privileges are expressed as a 'CNF' of the principals
 -- whose authority is being exercised.
 type DCPriv = Priv CNF
-
--- | An alias for 'Labeled' values labeled with a 'DCLabel'.
-type DCLabeled = Labeled DCLabel
 
 -- | Wrapper function for running @'LIO' 'DCLabel'@ computations.
 --

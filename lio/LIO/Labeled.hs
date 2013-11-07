@@ -26,6 +26,7 @@ Two 'Applicative' 'Functor'-like operations are also defined for
 
 module LIO.Labeled (
     Labeled, LabelOf(..)
+  , DCLabeled
   -- * Label values
   , label, labelP
   -- * Unlabel values
@@ -43,6 +44,11 @@ import safe LIO.Label
 import safe LIO.Core
 import LIO.TCB
 
+import LIO.DCLabel
+
+-- | An alias for 'Labeled' values labeled with a 'DCLabel'.
+type DCLabeled = Labeled DCLabel
+
 --
 -- Label values
 --
@@ -52,7 +58,7 @@ import LIO.TCB
 -- clearance is @ccurrent@, then the label @l@ specified must satisfy
 -- @lcurrent ``canFlowTo`` l && l ``canFlowTo`` ccurrent@. Otherwise
 -- an exception is thrown (see 'guardAlloc').
-label :: Label l => l -> a -> LIO l (Labeled l a)
+label :: DCLabel -> a -> LIO DCLabel (Labeled DCLabel a)
 label l a = do
   withContext "label" $ guardAlloc l
   return $ LabeledTCB l a
@@ -65,7 +71,7 @@ label l a = do
 -- not used to bypass the clearance.  You must use 'setClearanceP' to
 -- raise the clearance first if you wish to create a 'Labeled' value
 -- at a higher label than the current clearance.
-labelP :: PrivDesc l p => Priv p -> l -> a -> LIO l (Labeled l a)
+labelP ::  DCPriv -> DCLabel -> a -> LIO DCLabel (Labeled DCLabel a)
 labelP p l a = do
   withContext "labelP" $ guardAllocP p l
   return $ LabeledTCB l a
@@ -89,7 +95,7 @@ labelP p l a = do
 -- above the current clearance, then @unlabel@ throws an exception of
 -- type 'LabelError'.  You can use 'labelOf' to check beforehand
 -- whether 'unlabel' will succeed.
-unlabel :: Label l => Labeled l a -> LIO l a
+unlabel :: Labeled DCLabel a -> LIO DCLabel a
 unlabel (LabeledTCB l v) = withContext "unlabel" (taint l) >> return v
 
 -- | Extracts the contents of a 'Labeled' value just like 'unlabel',
@@ -99,7 +105,7 @@ unlabel (LabeledTCB l v) = withContext "unlabel" (taint l) >> return v
 -- not change the current clarance and still throws a 'LabelError' if
 -- the privileges supplied are insufficient to save the current label
 -- from needing to exceed the current clearance.
-unlabelP :: PrivDesc l p => Priv p -> Labeled l a -> LIO l a
+unlabelP :: DCPriv -> Labeled DCLabel a -> LIO DCLabel a
 unlabelP p (LabeledTCB l v) = withContext "unlabelP" (taintP p l) >> return v
 
 --
@@ -115,8 +121,7 @@ unlabelP p (LabeledTCB l v) = withContext "unlabelP" (taintP p l) >> return v
 --   2. The old label and new label must be equal (modulo privileges),
 --   as enforced by 'canFlowToP'.
 --
-relabelLabeledP :: PrivDesc l p
-                => Priv p -> l -> Labeled l a -> LIO l (Labeled l a)
+relabelLabeledP :: DCPriv -> DCLabel -> Labeled DCLabel a -> LIO DCLabel (Labeled DCLabel a)
 relabelLabeledP p newl (LabeledTCB oldl v) = do
   clr <- getClearance
   unless (canFlowTo newl clr     &&
@@ -131,7 +136,7 @@ relabelLabeledP p newl (LabeledTCB oldl v) = do
 -- the current thread's clearance. If the supplied label is not
 -- bounded then @taintLabeled@ will throw an exception (see
 -- 'guardAlloc').
-taintLabeled :: Label l => l -> Labeled l a -> LIO l (Labeled l a)
+taintLabeled :: DCLabel -> Labeled DCLabel a -> LIO DCLabel (Labeled DCLabel a)
 taintLabeled l (LabeledTCB lold v) = do
   let lnew = lold `lub` l
   withContext "taintLabeled" $ guardAlloc lnew
@@ -141,8 +146,7 @@ taintLabeled l (LabeledTCB lold v) = do
 -- current label to the supplied label. In other words, this function
 -- can be used to lower the label of the labeled value by leveraging
 -- the supplied privileges.
-taintLabeledP :: PrivDesc l p
-              => Priv p -> l -> Labeled l a -> LIO l (Labeled l a)
+taintLabeledP :: DCPriv -> DCLabel -> Labeled DCLabel a -> LIO DCLabel (Labeled DCLabel a)
 taintLabeledP p l (LabeledTCB lold v) = do
   let lnew = lold `lub` l
   withContext "taintLabeledP" $ guardAllocP p lnew
@@ -176,7 +180,7 @@ the above issues.
 -- value.  Because of laziness, the actual computation on the value of
 -- type @a@ will be deferred until a thread with a higher label
 -- actually 'unlabel's the result.
-lFmap :: Label l => Labeled l a -> (a -> b) -> LIO l (Labeled l b)
+lFmap :: Labeled DCLabel a -> (a -> b) -> LIO DCLabel (Labeled DCLabel b)
 lFmap (LabeledTCB lold v) f = do
   l <- getLabel
   -- Result label is joined with current label
@@ -189,7 +193,7 @@ lFmap (LabeledTCB lold v) f = do
 -- labeld value. The label of the returned value is the 'lub' of the
 -- thread's current label, the label of the supplied function, and the
 -- label of the supplied value.
-lAp :: Label l => Labeled l (a -> b) -> Labeled l a -> LIO l (Labeled l b)
+lAp :: Labeled DCLabel (a -> b) -> Labeled DCLabel a -> LIO DCLabel (Labeled DCLabel b)
 lAp (LabeledTCB lf f) (LabeledTCB la a) = do
   l <- getLabel
   let lnew = l `lub` lf `lub` la
