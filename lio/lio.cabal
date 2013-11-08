@@ -68,9 +68,12 @@ Library
    ,containers
    ,bytestring
    ,hashable      >= 1.2
+   ,ghc
 
   GHC-options: -Wall -fno-warn-orphans
   include-dirs: LIO/TCB
+
+  C-sources: cbits/dup.c cbits/dup-prim.cmm
 
   Exposed-modules:
     -- * Top-level exporter
@@ -97,3 +100,4 @@ Library
     LIO.TCB
     LIO.TCB.LObj
     LIO.TCB.MLObj
+    LIO.SafeCopy
