@@ -30,6 +30,7 @@ import System.IO.Unsafe
 -- | Creates a new RCRef mirroring the CNF-structure of the new label.
 multiAlloc :: DCLabel -> a -> LIO DCLabel (MultiRCRef a)
 multiAlloc newl a = do
+  ioTCB $ putStrLn ("multiAlloc (newl = " ++ show newl ++ ")")
   ioTCB $ mkRCRefFromCNF (dcIntegrity newl) a
 
 -- | Creates a new RCRef mirroring the CNF-structure of the new label,
@@ -38,6 +39,7 @@ multiAlloc newl a = do
 multiAllocP :: DCPriv -> DCLabel -> Transfer a -> a -> LIO DCLabel (MultiRCRef a)
 multiAllocP p newl t a = do
   LIOState { lioLabel = l } <- getLIOStateTCB
+  ioTCB $ putStrLn ("multiAllocP (p = " ++ show p ++ "; newl = " ++ show newl ++ "; current_label = " ++ show l ++ ")")
   -- Some of the conjuncts may require privilege exercise to be
   -- satisfiable.  The formula we need to provide a construction
   -- for is as follows:
@@ -84,6 +86,7 @@ multiAllocP p newl t a = do
 -- optimal choice is (that minimizes final taint).  Needs the old LIOState.
 multiTaint :: LIOState DCLabel -> DCLabel -> MultiRCRef a -> LIO DCLabel a
 multiTaint old_state newl a = do
+    ioTCB . putStrLn $ "multiTaint..."
     (newl', r) <- multiExtract old_state (dcIntegrity newl) a
     setLabel newl'
     return r
@@ -91,6 +94,7 @@ multiTaint old_state newl a = do
 multiExtract :: LIOState DCLabel -> CNF -> MultiRCRef a -> LIO DCLabel (DCLabel, a)
 multiExtract old_state newl a = do
     LIOState { lioLabel = l, lioClearance = c } <- getLIOStateTCB
+    ioTCB . putStrLn $ "multiExtract (old_label = " ++ show (lioLabel old_state) ++ "; current_label = " ++ show l ++ "; newl = " ++ show newl ++ ")"
     oldl <- case cToList (dcIntegrity (lioLabel old_state)) of
                 [x] -> return x
                 [] -> error "multiTaint: current label illegally operating without container"
@@ -146,6 +150,7 @@ multiExtract old_state newl a = do
 -- by using privileges we will do so. taintP
 multiTaintP :: LIOState DCLabel -> DCPriv -> DCLabel -> Transfer a -> MultiRCRef a -> LIO DCLabel a
 multiTaintP old_state p newl t a = do
+    ioTCB . putStrLn $ "multiTaintP..."
     (newl', r) <- multiExtractP old_state p (dcIntegrity newl) t a
     setLabel newl'
     return r
@@ -153,6 +158,7 @@ multiTaintP old_state p newl t a = do
 multiExtractP :: LIOState DCLabel -> DCPriv -> CNF -> Transfer a -> MultiRCRef a -> LIO DCLabel (DCLabel, a)
 multiExtractP old_state p newl t a = do
     LIOState { lioLabel = l, lioClearance = c } <- getLIOStateTCB
+    ioTCB . putStrLn $ "multiExtractP (p = " ++ show p ++ "; old_label = " ++ show (lioLabel old_state) ++ "; current_label = " ++ show l ++ "; newl = " ++ show newl ++ ")"
     oldl <- case cToList (dcIntegrity (lioLabel old_state)) of
                 [x] -> return x
                 [] -> error "multiTaint: current label illegally operating without container"
@@ -193,6 +199,7 @@ multiExtractP old_state p newl t a = do
 
 multiFmap :: DCLabel -> (a -> b) -> MultiRCRef a -> IO (MultiRCRef b)
 multiFmap newl f rcref = do
+    putStrLn $ "multiFmap (newl = " ++ show newl ++ ")"
     forM (zip (cToList (dcIntegrity newl)) rcref) $ \(goal, r) -> do
         ma <- readAllRCRef r
         case ma of
